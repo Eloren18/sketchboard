@@ -1,0 +1,91 @@
+==========================================================
+  SKETCHBOARD — WHAT IT IS, WHERE IT LIVES, HOW TO UPDATE
+  (last updated 2026-09-07)
+==========================================================
+
+----------------------------------------------------------
+1. WHAT IT DOES
+----------------------------------------------------------
+A drawing board (Excalidraw) you share with Claude.
+  - You draw in the browser. Every change is saved to the cloud within
+    half a second, and a picture of the sketch is uploaded ~2 s later.
+  - The chat panel on the right is Claude. It sees the picture, can list
+    every element with exact positions, and can add / move / relabel /
+    remove things. The canvas updates live while it works.
+  - Claude Code on your PC can work on the same sketch from the command
+    line (see CLAUDE.md), so both "Claudes" and you draw on one canvas.
+  - Several sketches: switch, create, rename or delete them in the top bar.
+  - Sign-in is the same as the Budget app: your email + a 6-digit code,
+    invite-only. Each person sees only their own sketches.
+
+----------------------------------------------------------
+2. WHERE IT LIVES
+----------------------------------------------------------
+  FRONTEND   src/ + index.html (Vite build)  ->  GitHub Pages
+             repo    https://github.com/Eloren18/sketchboard
+             live    https://eloren18.github.io/sketchboard/
+
+  BACKEND    convex/ folder  ->  Convex (database, files, sign-in, chat)
+             dashboard  https://dashboard.convex.dev/t/kerem-ekdal/sketchboard
+             team kerem-ekdal / project sketchboard
+             production  https://dynamic-dotterel-890.convex.cloud
+             development https://loyal-whale-134.convex.cloud
+
+  EMAIL      Sign-in codes go through Resend (same key as the Budget app).
+             The free plan only delivers to keremladkeholland@gmail.com,
+             which is also the admin email.
+
+  CHAT       The assistant calls the Claude API from the Convex backend and
+             needs ANTHROPIC_API_KEY on the deployment (billed per use on
+             your Anthropic console account — NOT the Claude subscription).
+             Model: claude-opus-5 (change with env SKETCH_CHAT_MODEL).
+
+----------------------------------------------------------
+3. FIRST-TIME SETUP (things only you can do)
+----------------------------------------------------------
+  a) Secrets on Convex:  double-click  Setup-Secrets.bat
+        - copies RESEND_API_KEY from the Budget app's Convex project
+        - asks for your Claude API key (console.anthropic.com -> API keys)
+     Or by hand:
+        npx convex env set RESEND_API_KEY re_xxx
+        npx convex env set --prod RESEND_API_KEY re_xxx
+        npx convex env set ANTHROPIC_API_KEY sk-ant-xxx
+        npx convex env set --prod ANTHROPIC_API_KEY sk-ant-xxx
+
+  b) GitHub repo for the website:
+        1. On github.com create an EMPTY repo named  sketchboard
+           (public or private both work with Pages on your plan).
+        2. Repo -> Settings -> Pages -> Source: "GitHub Actions".
+        3. Double-click Deploy.bat (first time it may ask you to sign in).
+        The workflow .github/workflows/deploy.yml builds and publishes it.
+
+----------------------------------------------------------
+4. UPDATING THE APP
+----------------------------------------------------------
+  Changed anything in src/, public/, index.html?   -> Deploy.bat
+  Changed anything in convex/?                     -> Deploy-Backend.bat
+  The two halves are independent — deploy whichever you changed.
+
+----------------------------------------------------------
+5. SETTING UP ON A NEW COMPUTER
+----------------------------------------------------------
+  1. Install Node.js, then in this folder:  npm install
+  2. Link to Convex:  npx convex dev --once   (browser login; writes
+     .env.local, which is private and never committed)
+  3. Secrets: see 3a.   4. Publish backend:  npx convex deploy -y
+
+----------------------------------------------------------
+6. TROUBLESHOOTING
+----------------------------------------------------------
+  Code email not arriving     Check spam. Only the admin email receives
+                              codes on the free Resend plan. Make sure the
+                              RESEND key is set (npx convex env list --prod).
+  Chat says no API key        Run Setup-Secrets.bat, or set ANTHROPIC_API_KEY
+                              as in 3a. Then just send the message again.
+  Chat says key rejected      The key is wrong or revoked; make a new one.
+  "newer version in the cloud" The sketch was changed elsewhere (Claude,
+                              another tab); the browser reloaded it. Only
+                              the last half-second of drawing can be lost.
+  Want to see what is stored  dashboard.convex.dev -> sketchboard -> Data.
+                              Or:  node tools/sketch.mjs list --prod
+==========================================================

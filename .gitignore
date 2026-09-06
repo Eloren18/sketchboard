@@ -1,0 +1,15 @@
+node_modules
+dist
+.env
+.chat-session.json
+
+.env.local
+
+# Convex
+.env.local
+
+# Claude scratch files
+sketch.png
+scene.json
+edit.json
+.session-token.txt
