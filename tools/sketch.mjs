@@ -46,6 +46,45 @@ function run(fn, payload) {
 const b64 = (obj) => Buffer.from(JSON.stringify(obj), "utf8").toString("base64");
 const readJson = (file) => JSON.parse(fs.readFileSync(path.resolve(file), "utf8"));
 
+// Windows limits a command line to ~8 KB, so an edit is sent as several
+// calls when needed: removals first, then updates, then additions in chunks.
+// Order matters: ids freed by `remove` can be reused by `add`.
+const MAX_B64 = 6000;
+function applyEditChunked(id, edit) {
+  const calls = [];
+  const whole = { ...edit };
+  if (b64(whole).length <= MAX_B64) calls.push(whole);
+  else {
+    if (edit.remove?.length) calls.push({ remove: edit.remove });
+    if (edit.update?.length) for (const c of chunk(edit.update)) calls.push({ update: c });
+    if (edit.add?.length) for (const c of chunk(edit.add)) calls.push({ add: c });
+  }
+  const summary = [];
+  const newIds = [];
+  let version = 0;
+  for (const call of calls) {
+    const r = run("admin:edit", { id, b64: b64(call) });
+    summary.push(r.summary);
+    newIds.push(...(r.newIds || []));
+    version = r.version;
+  }
+  return { summary: summary.join("; "), newIds, version };
+}
+function chunk(items) {
+  const out = [];
+  let cur = [];
+  for (const it of items) {
+    if (cur.length && b64([...cur, it]).length > MAX_B64) {
+      out.push(cur);
+      cur = [];
+    }
+    if (b64([it]).length > MAX_B64) die(`One element is too large to send (${b64([it]).length} bytes encoded).`);
+    cur.push(it);
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+
 async function main() {
   switch (cmd) {
     case "list": {
@@ -79,16 +118,19 @@ async function main() {
     case "edit": {
       const [id, file] = rest;
       if (!id || !file) die("usage: edit <id> <edit.json>");
-      const r = run("admin:edit", { id, b64: b64(readJson(file)) });
-      console.log(`${r.summary}; now v${r.version}${r.newIds?.length ? `; new ids: ${r.newIds.join(", ")}` : ""}`);
+      const r = applyEditChunked(id, readJson(file));
+      console.log(`${r.summary}; now v${r.version}${r.newIds.length ? `; new ids: ${r.newIds.join(", ")}` : ""}`);
       return;
     }
     case "set": {
       const [id, file] = rest;
       if (!id || !file) die("usage: set <id> <scene.json>");
       const data = readJson(file);
-      const r = run("admin:setScene", { id, b64: b64({ elements: data.elements, appState: data.appState }) });
-      console.log(`replaced scene; now v${r.version}`);
+      // Replace in two steps so big scenes stay under the command-line limit:
+      // clear (with appState), then add the elements in chunks.
+      run("admin:setScene", { id, b64: b64({ elements: [], appState: data.appState }) });
+      const r = applyEditChunked(id, { add: data.elements || [] });
+      console.log(`replaced scene (${(data.elements || []).length} elements); now v${r.version}`);
       return;
     }
     case "new": {

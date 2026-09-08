@@ -21,16 +21,23 @@ const PNG_DEBOUNCE_MS = 2000;
 // existing shapes by id.
 function normalizeElements(raw) {
   const list = Array.isArray(raw) ? raw.filter(Boolean) : [];
-  const hasSkeleton = list.some((el) => el.versionNonce === undefined);
+  const isSkeleton = (el) => el.versionNonce === undefined;
+  const hasSkeleton = list.some(isSkeleton);
   let elements = list;
   if (hasSkeleton) {
+    // Full (already stored) text elements must NOT go through the converter:
+    // it treats x/y as the text's alignment anchor and would shift centred
+    // labels up-left by half their size. Full shapes/arrows are passed so
+    // skeleton arrows can bind to them by id; stored texts are appended after.
+    const fullTexts = list.filter((el) => !isSkeleton(el) && el.type === "text");
+    const input = list.filter((el) => isSkeleton(el) || el.type !== "text");
     try {
-      elements = convertToExcalidrawElements(list, { regenerateIds: false });
+      elements = [...convertToExcalidrawElements(input, { regenerateIds: false }), ...fullTexts];
     } catch (e) {
       console.error("convertToExcalidrawElements failed", e);
     }
   }
-  const restored = restoreElements(elements, null, { refreshDimensions: hasSkeleton, repairBindings: true });
+  const restored = restoreElements(elements, null, { refreshDimensions: false, repairBindings: true });
   return { elements: restored, expanded: hasSkeleton };
 }
 

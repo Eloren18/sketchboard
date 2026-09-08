@@ -43,6 +43,7 @@ export function applyEdit(elementsJson: string, edit: Edit): { elements: unknown
     const before = elements.length;
     elements = elements.filter((e) => !removeIds.has(String(e.id)));
     removed = before - elements.length;
+    for (const id of removeIds) byId.delete(id); // removed ids may be reused by `add`
     for (const e of elements) {
       // Drop dangling references so the browser does not choke on them.
       if (Array.isArray(e.boundElements)) {
