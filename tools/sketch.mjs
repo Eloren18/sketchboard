@@ -25,12 +25,11 @@ const args = argv.filter((a) => a !== "--prod");
 const [cmd, ...rest] = args;
 
 function run(fn, payload) {
-  const cliArgs = ["convex", "run", fn, JSON.stringify(payload ?? {})];
+  const cliArgs = [path.join(root, "node_modules", "convex", "bin", "main.js"), "run", fn, JSON.stringify(payload ?? {})];
   if (prod) cliArgs.push("--prod");
-  // shell:true is required to launch npx on Windows; the JSON only contains
-  // ids, titles and base64, so quoting stays safe.
-  const quoted = cliArgs.map((a) => (/^[\w:.\-]+$/.test(a) ? a : `"${a.replace(/"/g, '\\"')}"`));
-  const r = spawnSync(`npx ${quoted.join(" ")}`, { cwd: root, shell: true, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  // Spawn the Convex CLI through node directly (no cmd.exe), so arguments are
+  // passed verbatim and the 8 KB command-line limit of the shell does not apply.
+  const r = spawnSync(process.execPath, cliArgs, { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) {
     process.stderr.write(r.stderr || r.stdout || "");
     process.exit(r.status ?? 1);
@@ -46,10 +45,11 @@ function run(fn, payload) {
 const b64 = (obj) => Buffer.from(JSON.stringify(obj), "utf8").toString("base64");
 const readJson = (file) => JSON.parse(fs.readFileSync(path.resolve(file), "utf8"));
 
-// Windows limits a command line to ~8 KB, so an edit is sent as several
-// calls when needed: removals first, then updates, then additions in chunks.
-// Order matters: ids freed by `remove` can be reused by `add`.
-const MAX_B64 = 6000;
+// Windows caps a process command line at ~32 KB, so a very large edit is sent
+// as several calls: removals first, then updates, then additions in chunks.
+// Order matters: ids freed by `remove` can be reused by `add`. Prefer one call:
+// the browser expands each call separately, and one call keeps labels stable.
+const MAX_B64 = 28000;
 function applyEditChunked(id, edit) {
   const calls = [];
   const whole = { ...edit };

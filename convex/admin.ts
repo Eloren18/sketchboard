@@ -3,7 +3,7 @@
 // the deployment's admin credentials from `npx convex dev` / `npx convex login`.
 import { ConvexError, v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
-import { ADMIN_EMAIL, norm, randomToken } from "./lib";
+import { ADMIN_EMAIL, MAX_SCENE_BYTES, SESSION_MAX_AGE_MS, norm, randomToken, sha256Hex, utf8Bytes } from "./lib";
 import { applyEdit, type Edit } from "./sceneEdit";
 
 function decodeB64Json(b64: string): unknown {
@@ -14,6 +14,18 @@ function decodeB64Json(b64: string): unknown {
 
 export const listSketches = internalQuery({
   args: {},
+  returns: v.array(
+    v.object({
+      id: v.id("sketches"),
+      owner: v.string(),
+      title: v.string(),
+      version: v.number(),
+      updatedAt: v.string(),
+      updatedBy: v.string(),
+      hasPng: v.boolean(),
+      pngUpdatedAt: v.union(v.string(), v.null()),
+    }),
+  ),
   handler: async (ctx) => {
     const rows = await ctx.db.query("sketches").order("desc").take(200);
     return rows.map((r) => ({
@@ -31,6 +43,14 @@ export const listSketches = internalQuery({
 
 export const getScene = internalQuery({
   args: { id: v.id("sketches") },
+  returns: v.object({
+    title: v.string(),
+    version: v.number(),
+    updatedAt: v.string(),
+    updatedBy: v.string(),
+    appState: v.any(),
+    elements: v.array(v.any()),
+  }),
   handler: async (ctx, { id }) => {
     const doc = await ctx.db.get(id);
     if (!doc) throw new ConvexError("Sketch not found.");
@@ -47,6 +67,7 @@ export const getScene = internalQuery({
 
 export const pngUrl = internalQuery({
   args: { id: v.id("sketches") },
+  returns: v.object({ url: v.union(v.string(), v.null()), updatedAt: v.union(v.string(), v.null()) }),
   handler: async (ctx, { id }) => {
     const doc = await ctx.db.get(id);
     if (!doc) throw new ConvexError("Sketch not found.");
@@ -61,6 +82,7 @@ export const pngUrl = internalQuery({
 // b64: base64 of a JSON object {add?, update?, remove?} (see sceneEdit.ts).
 export const edit = internalMutation({
   args: { id: v.id("sketches"), b64: v.string() },
+  returns: v.object({ summary: v.string(), newIds: v.array(v.string()), version: v.number() }),
   handler: async (ctx, { id, b64 }) => {
     const doc = await ctx.db.get(id);
     if (!doc) throw new ConvexError("Sketch not found.");
@@ -79,17 +101,18 @@ export const edit = internalMutation({
 // b64: base64 of a JSON object {elements: [...], appState?: {...}}.
 export const setScene = internalMutation({
   args: { id: v.id("sketches"), b64: v.string() },
+  returns: v.object({ version: v.number() }),
   handler: async (ctx, { id, b64 }) => {
     const doc = await ctx.db.get(id);
     if (!doc) throw new ConvexError("Sketch not found.");
     const data = decodeB64Json(b64) as { elements?: unknown[]; appState?: unknown };
     if (!Array.isArray(data.elements)) throw new ConvexError("Expected {elements: [...]}.");
     const elements = JSON.stringify(data.elements);
-    if (elements.length > 900_000) throw new ConvexError("The sketch is too large to store.");
+    if (utf8Bytes(elements) > MAX_SCENE_BYTES) throw new ConvexError("The sketch is too large to store.");
     const version = doc.version + 1;
     await ctx.db.patch(id, {
       elements,
-      ...(data.appState ? { appState: JSON.stringify(data.appState) } : {}),
+      ...(data.appState && typeof data.appState === "object" ? { appState: JSON.stringify(data.appState) } : {}),
       version,
       updatedAt: Date.now(),
       updatedBy: "cli",
@@ -100,6 +123,7 @@ export const setScene = internalMutation({
 
 export const createSketch = internalMutation({
   args: { title: v.string(), owner: v.optional(v.string()) },
+  returns: v.id("sketches"),
   handler: async (ctx, { title, owner }) => {
     const now = Date.now();
     return await ctx.db.insert("sketches", {
@@ -118,9 +142,42 @@ export const createSketch = internalMutation({
 // caller already holds admin rights on the deployment to reach this).
 export const devSession = internalMutation({
   args: { email: v.optional(v.string()) },
+  returns: v.object({ token: v.string() }),
   handler: async (ctx, { email }) => {
     const token = randomToken();
-    await ctx.db.insert("sessions", { token, email: norm(email || ADMIN_EMAIL), createdAt: Date.now() });
+    const now = Date.now();
+    await ctx.db.insert("sessions", {
+      tokenHash: await sha256Hex(token),
+      email: norm(email || ADMIN_EMAIL),
+      createdAt: now,
+      expiresAt: now + SESSION_MAX_AGE_MS,
+    });
     return { token };
+  },
+});
+
+// One-off migration: hash legacy plaintext session tokens and set expiresAt.
+// Safe to run repeatedly; rows already migrated are skipped.
+export const migrateSessions = internalMutation({
+  args: {},
+  returns: v.object({ migrated: v.number(), remaining: v.number() }),
+  handler: async (ctx) => {
+    const rows = await ctx.db.query("sessions").take(500);
+    let migrated = 0;
+    for (const s of rows) {
+      const patch: { tokenHash?: string; token?: undefined; expiresAt?: number } = {};
+      if (!s.tokenHash && s.token) {
+        patch.tokenHash = await sha256Hex(s.token);
+        patch.token = undefined; // removes the plaintext field
+      } else if (s.token) {
+        patch.token = undefined;
+      }
+      if (!s.expiresAt) patch.expiresAt = s.createdAt + SESSION_MAX_AGE_MS;
+      if (Object.keys(patch).length) {
+        await ctx.db.patch(s._id, patch);
+        migrated++;
+      }
+    }
+    return { migrated, remaining: rows.length === 500 ? -1 : 0 };
   },
 });

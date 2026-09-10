@@ -13,6 +13,7 @@ import type * as admin from "../admin.js";
 import type * as auth from "../auth.js";
 import type * as chat from "../chat.js";
 import type * as chatAction from "../chatAction.js";
+import type * as crons from "../crons.js";
 import type * as lib from "../lib.js";
 import type * as sceneEdit from "../sceneEdit.js";
 import type * as sketches from "../sketches.js";
@@ -29,6 +30,7 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   chat: typeof chat;
   chatAction: typeof chatAction;
+  crons: typeof crons;
   lib: typeof lib;
   sceneEdit: typeof sceneEdit;
   sketches: typeof sketches;

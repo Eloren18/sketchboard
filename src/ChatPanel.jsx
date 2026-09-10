@@ -67,7 +67,10 @@ export default function ChatPanel({ token, sketchId }) {
   const listRef = useRef(null);
   const inputRef = useRef(null);
 
-  const streaming = !!messages?.some((m) => m.status === "streaming");
+  // A reply still "streaming" after 10 minutes is dead (the server treats it the
+  // same way): do not let it keep the panel locked.
+  const STALE_MS = 10 * 60 * 1000;
+  const streaming = !!messages?.some((m) => m.status === "streaming" && Date.now() - m.createdAt < STALE_MS);
 
   useEffect(() => {
     const el = listRef.current;

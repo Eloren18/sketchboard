@@ -14,7 +14,9 @@ export default defineSchema({
     updatedBy: v.string(), // "browser" | "claude" | "cli"
     pngId: v.optional(v.id("_storage")), // latest rendering uploaded by a browser
     pngUpdatedAt: v.optional(v.number()),
-  }).index("by_ownerEmail", ["ownerEmail"]),
+  })
+    .index("by_ownerEmail", ["ownerEmail"])
+    .index("by_ownerEmail_and_updatedAt", ["ownerEmail", "updatedAt"]),
 
   // Chat transcript per sketch. Assistant rows are patched while streaming.
   messages: defineTable({
@@ -43,12 +45,17 @@ export default defineSchema({
     sentAt: v.number(),
   }).index("by_email", ["email"]),
 
-  // Signed-in devices. Token lives in the browser's localStorage.
+  // Signed-in devices. The browser keeps the raw token; only its SHA-256 is
+  // stored here. `token` is the pre-hashing legacy field (migrated by
+  // admin.migrateSessions) and is no longer written.
   sessions: defineTable({
-    token: v.string(),
+    tokenHash: v.optional(v.string()),
+    token: v.optional(v.string()),
     email: v.string(),
     createdAt: v.number(),
+    expiresAt: v.optional(v.number()), // enforced by the daily cron in crons.ts
   })
-    .index("by_token", ["token"])
-    .index("by_email", ["email"]),
+    .index("by_tokenHash", ["tokenHash"])
+    .index("by_email", ["email"])
+    .index("by_expiresAt", ["expiresAt"]),
 });

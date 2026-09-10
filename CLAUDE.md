@@ -33,6 +33,12 @@ Human-facing notes: `SETUP-Convex.txt`. Deployments: dev `loyal-whale-134`, prod
   assistant row. Tools: `get_sketch`, `update_sketch` (`convex/sceneEdit.ts`). Needs `ANTHROPIC_API_KEY`
   on the deployment. The chat assistant sees the latest PNG the browser uploaded (`pngId`).
 - `convex/admin.ts` — internal functions for the CLI below (not reachable from browsers).
+- Sessions store only a SHA-256 `tokenHash` (raw token stays in the browser); expiry is swept by the daily
+  cron in `convex/crons.ts` (queries never read the clock). Env vars are typed in `convex/convex.config.ts`
+  and read via `env` from `_generated/server`. A stuck chat reply is unblocked by `chat.markStale`
+  (watchdog scheduled by `send`) and Stop; the action polls `chat.isCancelled` every second.
+- Browser sync (`src/Board.jsx`): saves are serialized; on a version conflict the newer cloud scene is merged
+  three-way against the last synced scene (user's unsaved edits win) and re-saved.
 - `src/Board.jsx` — Excalidraw + sync. Elements without `versionNonce` are shorthand: the browser expands
   them with `convertToExcalidrawElements` (labels, `start`/`end` bindings) and writes the full form back.
 - `src/ChatPanel.jsx`, `src/AuthGate.jsx`, `src/App.jsx` (sketch switcher).

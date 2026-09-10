@@ -112,7 +112,8 @@ export function applyEdit(elementsJson: string, edit: Edit): { elements: unknown
   }
 
   const out = JSON.stringify(elements);
-  if (out.length > MAX_SCENE_BYTES) throw new Error("The sketch is too large to store (over ~900 KB). Remove some elements first.");
+  // Convex's 1 MB document limit is in UTF-8 bytes, not string length.
+  if (new TextEncoder().encode(out).length > MAX_SCENE_BYTES) throw new Error("The sketch is too large to store (over ~900 KB). Remove some elements first.");
 
   const bits: string[] = [];
   if (newIds.length) bits.push(`added ${newIds.length}`);

@@ -3,14 +3,14 @@
 // with tools to inspect and edit the sketch. Runs in the Node runtime.
 import Anthropic from "@anthropic-ai/sdk";
 import { v } from "convex/values";
-import { internalAction, type ActionCtx } from "./_generated/server";
+import { env, internalAction, type ActionCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { summarizeElements } from "./sceneEdit";
 
-const MODEL = process.env.SKETCH_CHAT_MODEL || "claude-opus-5";
 const MAX_TOOL_ROUNDS = 12;
 const FLUSH_MS = 250;
+const CANCEL_POLL_MS = 1000;
 
 const SYSTEM = `You are the assistant inside Sketchboard, a shared Excalidraw canvas. The user draws in the browser and talks to you in a narrow chat panel beside the canvas, so keep replies short and conversational: a sentence or two unless they ask for more. No markdown headers.
 
@@ -57,11 +57,21 @@ const tools: Anthropic.Tool[] = [
 ];
 
 type Part = { kind: "text"; text: string } | { kind: "tool"; label: string };
+type Edit = { add?: Record<string, unknown>[]; update?: { id: string; patch: Record<string, unknown> }[]; remove?: string[] };
 
 function toolLabel(name: string, summary?: string) {
   if (name === "get_sketch") return "Looking at the sketch";
   if (name === "update_sketch") return summary ? `Updated the sketch (${summary})` : "Updating the sketch";
   return `Using ${name}`;
+}
+
+function asEdit(input: unknown): Edit {
+  const o = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  return {
+    add: Array.isArray(o.add) ? (o.add as Record<string, unknown>[]) : undefined,
+    update: Array.isArray(o.update) ? (o.update as { id: string; patch: Record<string, unknown> }[]) : undefined,
+    remove: Array.isArray(o.remove) ? (o.remove as string[]).map(String) : undefined,
+  };
 }
 
 async function runTool(ctx: ActionCtx, sketchId: Id<"sketches">, name: string, input: unknown): Promise<{ result: string; label: string; isError?: boolean }> {
@@ -72,7 +82,7 @@ async function runTool(ctx: ActionCtx, sketchId: Id<"sketches">, name: string, i
   }
   if (name === "update_sketch") {
     try {
-      const r = await ctx.runMutation(internal.sketches.applyEditInternal, { id: sketchId, edit: input ?? {}, by: "claude" });
+      const r = await ctx.runMutation(internal.sketches.applyEditInternal, { id: sketchId, edit: asEdit(input), by: "claude" });
       return { result: JSON.stringify({ ok: true, summary: r.summary, newIds: r.newIds }), label: toolLabel(name, r.summary) };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -92,12 +102,14 @@ function friendlyError(e: unknown): string {
 
 export const run = internalAction({
   args: { assistantId: v.id("messages"), sketchId: v.id("sketches") },
+  returns: v.null(),
   handler: async (ctx, { assistantId, sketchId }) => {
     const parts: Part[] = [];
     let text = "";
     let cancelled = false;
     let lastFlush = 0;
     let flushing: Promise<void> | null = null;
+    let currentStream: { abort: () => void } | null = null;
 
     const flush = async (status?: "streaming" | "done" | "error", error?: string) => {
       const r = await ctx.runMutation(internal.chat.setProgress, {
@@ -112,7 +124,9 @@ export const run = internalAction({
     const flushSoon = () => {
       if (flushing || Date.now() - lastFlush < FLUSH_MS) return;
       lastFlush = Date.now();
-      flushing = flush().catch(() => {}).finally(() => (flushing = null));
+      flushing = flush()
+        .catch((e) => console.warn("progress flush failed", e instanceof Error ? e.message : e))
+        .finally(() => (flushing = null));
     };
     const appendText = (delta: string) => {
       text += delta;
@@ -120,14 +134,29 @@ export const run = internalAction({
       if (last && last.kind === "text") last.text += delta;
       else parts.push({ kind: "text", text: delta });
     };
+    // Stop is noticed even while the model is thinking or running a tool: poll
+    // the cancel flag on a timer and abort the in-flight stream.
+    const cancelPoll = setInterval(() => {
+      ctx
+        .runQuery(internal.chat.isCancelled, { assistantId })
+        .then((c) => {
+          if (c && !cancelled) {
+            cancelled = true;
+            currentStream?.abort();
+          }
+        })
+        .catch(() => {});
+    }, CANCEL_POLL_MS);
 
     try {
-      if (!process.env.ANTHROPIC_API_KEY) {
+      const apiKey = env.ANTHROPIC_API_KEY;
+      if (!apiKey) {
         throw new Error(
           "No Claude API key is set on the Convex deployment. Run: npx convex env set ANTHROPIC_API_KEY sk-ant-... (and again with --prod for the live site).",
         );
       }
-      const client = new Anthropic();
+      const model = env.SKETCH_CHAT_MODEL || "claude-opus-5";
+      const client = new Anthropic({ apiKey });
       const hist = await ctx.runQuery(internal.chat.history, { sketchId, assistantId });
       if (!hist.length || hist[hist.length - 1].role !== "user") throw new Error("Nothing to reply to.");
       const scene = await ctx.runQuery(internal.sketches.internalGet, { id: sketchId });
@@ -140,13 +169,16 @@ export const run = internalAction({
           image = { type: "image", source: { type: "base64", media_type: "image/png", data } };
         }
       }
+      const imageStale = !!(scene?.pngUpdatedAt && scene.updatedAt && scene.pngUpdatedAt < scene.updatedAt);
 
       const messages: Anthropic.MessageParam[] = hist
         .slice(0, -1)
         .map((m) => ({ role: m.role, content: m.text }));
       const last = hist[hist.length - 1].text;
       const sceneNote = image
-        ? "The current sketch is attached as an image."
+        ? imageStale
+          ? "The current sketch is attached as an image; it was rendered slightly before the latest edits, so use get_sketch for exact current positions."
+          : "The current sketch is attached as an image."
         : "No rendered image of the sketch is available yet (the browser renders one after the first drawing). Use get_sketch to inspect it.";
       messages.push({
         role: "user",
@@ -156,9 +188,9 @@ export const run = internalAction({
         ],
       });
 
-      for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      for (let round = 0; round < MAX_TOOL_ROUNDS && !cancelled; round++) {
         const stream = client.messages.stream({
-          model: MODEL,
+          model,
           max_tokens: 16000,
           system: [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }],
           tools,
@@ -166,12 +198,14 @@ export const run = internalAction({
           thinking: { type: "adaptive" },
           output_config: { effort: "medium" },
         });
+        currentStream = stream;
         stream.on("text", (delta) => {
           appendText(delta);
           flushSoon();
           if (cancelled) stream.abort();
         });
         const message = await stream.finalMessage();
+        currentStream = null;
         if (message.stop_reason === "refusal") {
           throw new Error("The assistant declined that request" + (message.stop_details?.explanation ? `: ${message.stop_details.explanation}` : "."));
         }
@@ -198,7 +232,9 @@ export const run = internalAction({
       if (flushing) await flushing.catch(() => {});
       const msg = friendlyError(e);
       console.error("chat error", msg);
-      await flush(cancelled ? "done" : "error", msg).catch(() => {});
+      await flush(cancelled ? "done" : "error", msg).catch((err) => console.warn("final flush failed", err instanceof Error ? err.message : err));
+    } finally {
+      clearInterval(cancelPoll);
     }
     return null;
   },
